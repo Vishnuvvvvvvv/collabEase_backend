@@ -7,10 +7,6 @@ install nodemodules:
 
         npm install
 
-Navigate to the backend folder:
+Start the backend server:
 
-        cd backend
-
-Start the backend server with Nodemon:
-
-        nodemon server.js
+        node server.js

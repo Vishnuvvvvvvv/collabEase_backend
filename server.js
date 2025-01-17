@@ -4,6 +4,11 @@ const { v4: uuidv4 } = require("uuid");
 const cors = require("cors");
 const twilio = require("twilio");
 const path = require("path");
+const { AssemblyAI } = require("assemblyai");
+
+const client = new AssemblyAI({
+  apiKey: "694f60992656421a85b64ae955ae7374",
+});
 
 const PORT = process.env.PORT || 5002;
 const app = express();
@@ -12,12 +17,13 @@ const server = http.createServer(app);
 const multer = require("multer");
 const axios = require("axios");
 const fs = require("fs");
+const upload = multer({ dest: "uploads/" });
 
 app.use(cors());
 
 let connectedUsers = [];
 let rooms = [];
-
+const roooms = {};
 // Serve static files from the frontend build directory
 // app.use(express.static(path.join(__dirname, '..', 'frontend', 'build')));
 
@@ -25,7 +31,9 @@ let rooms = [];
 // app.get('/', (req, res) => {
 //   res.sendFile(path.join(__dirname, '..', 'frontend', 'build', 'index.html'));
 // });
-
+app.get("/", (req, res) => {
+  res.send("helloo");
+});
 // create route to check if room exists
 app.get("/api/room-exists/:roomId", (req, res) => {
   const { roomId } = req.params;
@@ -62,17 +70,135 @@ app.get("/api/get-turn-credentials", (req, res) => {
   }
 });
 
+function generateSpeakerMapping(names) {
+  // Remove duplicates while preserving order
+  const uniqueNames = [...new Set(names)];
+
+  // Create unique speaker tags
+  const speakerTags = uniqueNames.map(
+    (_, i) => `Speaker ${String.fromCharCode(65 + i)}`
+  );
+
+  // Create mapping from speaker tags to names
+  const tagToName = {};
+  speakerTags.forEach((tag, index) => {
+    tagToName[tag] = uniqueNames[index];
+  });
+
+  return tagToName;
+}
+
+app.post(
+  "/multi-transcribe",
+
+  upload.single("audio_file"),
+  async (req, res) => {
+    console.log("getet");
+    let firstValue;
+    if (Object.keys(roooms).length > 0) {
+      const firstKey = Object.keys(roooms)[0];
+      firstValue = roooms[firstKey];
+      console.log("active speaker arry : ", firstValue);
+    } else {
+      console.log("The object is empty.");
+    }
+    try {
+      const filePath = req.file.path;
+
+      // Send file to AssemblyAI for transcription
+      const params = {
+        audio: fs.createReadStream(filePath),
+        speaker_labels: true,
+      };
+
+      console.log("sended..");
+      const transcript = await client.transcripts.transcribe(params);
+      console.log("trancript", transcript);
+      let transcribedText = "";
+      for (const utterance of transcript.utterances) {
+        transcribedText +=
+          `Speaker ${utterance.speaker}: ${utterance.text}` + "\n";
+      }
+      // Send back the transcription result
+
+      console.log("transcribedText is ", transcribedText);
+
+      let result = "";
+      if (firstValue) {
+        const tagToName = generateSpeakerMapping(firstValue);
+
+        for (const [speaker, name] of Object.entries(tagToName)) {
+          result += transcribedText.replace(new RegExp(speaker, "g"), name);
+        }
+
+        console.log("transcribedText speaker mapping is ", result);
+      }
+      res.status(200).json({
+        transcript: result ? result : transcribedText,
+      });
+      // Clean up the uploaded file after transcription
+      fs.unlinkSync(filePath);
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to process transcription" });
+    }
+  }
+);
+
 const io = require("socket.io")(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"],
   },
 });
+const activeSpeakers = [];
 
 io.on("connection", (socket) => {
   console.log(`user connected ${socket.id}`);
 
   //we need to get these informations from frontend
+
+  // socket.on("activeSpeaker", ({ name }) => {
+  //   const lastSpeaker = activeSpeakers[activeSpeakers.length - 1];
+  //   if (name !== lastSpeaker) {
+  //     activeSpeakers.push(name);
+  //     console.log(`Speaker added: ${name}`);
+  //     console.log("Current speaker order:", activeSpeakers);
+
+  //     // Optional: Broadcast the updated speaker list
+  //     io.emit("updateActiveSpeakers", activeSpeakers);
+  //   }
+  // });
+  // Storage for rooms and their speakers
+  console.log("Server started at", new Date(), roooms); // Log the start time
+  socket.on("speaking", ({ roomId, name }) => {
+    console.log(
+      `Received speaking event: ${name} for room ${roomId} and speakers array is:`,
+      roooms[roomId] || [] // Log the speakers for the room, or an empty array if the room doesn't exist yet
+    );
+    console.log("full room is:  ", roooms);
+
+    // Initialize room's speakers if not already set
+    if (!roooms[roomId]) {
+      roooms[roomId] = [];
+    }
+
+    // Only add the speaker to the array if the last speaker is different from the current speaker
+    if (
+      roooms[roomId].length === 0 ||
+      roooms[roomId][roooms[roomId].length - 1] !== name
+    ) {
+      roooms[roomId].push(name); // Only push if not the same as the last speaker
+      console.log(
+        `New speaker added for room ${roomId}. Updated speakers array:`,
+        roooms[roomId]
+      );
+    } else {
+      console.log(
+        `${name} is the last speaker for room ${roomId}, not adding again.`
+      );
+    }
+  });
 
   socket.on("create-new-room", (data) => {
     console.log("Create new room clicked !");
@@ -152,6 +278,14 @@ const joinRoomHandler = (data, socket) => {
 
   // join room as user which just is trying to join room passing room id
   const room = rooms.find((room) => room.id === roomId);
+  if (!room) {
+    console.error(
+      `Room with an ID ${roomId} does not exist. Available rooms:`,
+      rooms
+    );
+    socket.emit("room-error", { error: "Room not found." });
+    return;
+  }
   room.connectedUsers = [...room.connectedUsers, newUser];
 
   // join socket.io room
